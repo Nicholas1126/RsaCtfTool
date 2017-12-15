@@ -23,6 +23,8 @@ import re
 import argparse
 import os
 import subprocess
+import time
+import string
 from glob import glob
 
 
@@ -139,6 +141,7 @@ class RSAAttack(object):
             url_2 = 'http://www.factordb.com/index.php?id=%s'
             s = requests.Session()
             r = s.get(url_1 % self.pub_key.n)
+            time.sleep(5)
             regex = re.compile("index\.php\?id\=([0-9]+)", re.IGNORECASE)
             ids = regex.findall(r.text)
             p_id = ids[1]
@@ -157,6 +160,7 @@ class RSAAttack(object):
                                        long(self.pub_key.e), long(self.pub_key.n))
             return
         except Exception as e:
+            print '[!] exception occur.'
             return
 
     def wiener(self):
@@ -367,16 +371,70 @@ class RSAAttack(object):
         # private key without spending any time factoring
         return
 
+    def rabin(self):
+
+        if long(self.pub_key.e) == 2 and self.cipher is not None:
+            try:
+                url_1 = 'http://www.factordb.com/index.php?query=%i'
+                url_2 = 'http://www.factordb.com/index.php?id=%s'
+                s = requests.Session()
+                r = s.get(url_1 % self.pub_key.n)
+                time.sleep(5)
+                regex = re.compile("index\.php\?id\=([0-9]+)", re.IGNORECASE)
+                ids = regex.findall(r.text)
+                p_id = ids[1]
+                q_id = ids[2]
+                # bugfix: See https://github.com/sourcekris/RsaCtfTool/commit/16d4bb258ebb4579aba2bfc185b3f717d2d91330#commitcomment-21878835
+                regex = re.compile("value=\"([0-9\^\-]+)\"", re.IGNORECASE)
+                r_1 = s.get(url_2 % p_id)
+                r_2 = s.get(url_2 % q_id)
+                key_p = regex.findall(r_1.text)[0]
+                key_q = regex.findall(r_2.text)[0]
+
+                p = string.atoi(key_p, base=10)
+                q = string.atoi(key_q, base=10)
+                cipher = self.cipher.encode('hex')
+                cipher = string.atoi(cipher, base=16)
+                N = self.pub_key.n
+
+                yp = gmpy.invert(p, q)
+                yq = gmpy.invert(q, p)
+
+                mp = pow(cipher, (p + 1) / 4, p)
+                mq = pow(cipher, (q + 1) / 4, q)
+                a = (yp * p * mq + yq * q * mp) % N
+                b = N - int(a)
+                c = (yp * p * mq - yq * q * mp) % N
+                d = N - int(c)
+
+                for i in (a, b, c, d):
+                    s = '%x' % i
+                    if len(s) % 2 != 0:
+                        s = '0' + s
+                    print s.decode('hex')
+
+                return
+            except Exception as e:
+                return
+
+        return
+
     def attack(self):
         if self.attackobjs is not None:
             self.commonfactors()
         else:
             # loop through implemented attack methods and conduct attacks
             for attack in self.implemented_attacks:
-                if self.args.verbose and "nullattack" not in attack.__name__:
-                    print "[*] Performing " + attack.__name__ + " attack."
 
-                getattr(self, attack.__name__)()
+                if self.args.attack is not None and self.args.attack == attack.__name__:
+                    print "[*] Performing " + attack.__name__ + " attack."
+                    getattr(self, attack.__name__)()
+                    break
+                elif self.args.attack is None or (self.args.attack is not None and self.args.attack == "all"):
+                    if self.args.verbose and "nullattack" not in attack.__name__:
+                        print "[*] Performing " + attack.__name__ + " attack."
+                    getattr(self, attack.__name__)()
+
 
                 # check and print resulting private key
                 if self.priv_key is not None:
@@ -395,10 +453,10 @@ class RSAAttack(object):
             elif self.unciphered is not None:
                     print "[+] Clear text : %s" % self.unciphered
             else:
-                if self.args.uncipher is not None:
+                if self.args.uncipher is not None and self.args.attack is None:
                     print "[-] Sorry, cracking failed"
 
-    implemented_attacks = [ nullattack, hastads, factordb, pastctfprimes, noveltyprimes, smallq, wiener, comfact_cn, fermat, siqs ]
+    implemented_attacks = [ nullattack, hastads, factordb, pastctfprimes, noveltyprimes, smallq, wiener, comfact_cn, fermat, siqs, rabin ]
 
 # source http://stackoverflow.com/a/22348885
 class timeout:
@@ -435,6 +493,7 @@ if __name__ == "__main__":
     group.add_argument('--publickey', help='public key file. You can use wildcards for multiple keys.')
     group.add_argument('--createpub', help='Take n and e from cli and just print a public key then exit', action='store_true')
     group.add_argument('--dumpkey', help='Just dump the RSA variables from a key - n,e,d,p,q', action='store_true')
+
     parser.add_argument('--uncipher', help='uncipher a file', default=None)
     parser.add_argument('--verbose', help='verbose mode (display n, e, p and q)', action='store_true')
     parser.add_argument('--private', help='Display private key if recovered', action='store_true')
@@ -442,9 +501,10 @@ if __name__ == "__main__":
     parser.add_argument('--n', type=long, help='Specify the modulus in --createpub mode.')
     parser.add_argument('--e', type=long, help='Specify the public exponent in --createpub mode.')
     parser.add_argument('--key', help='Specify the input key file in --dumpkey mode.')
+    parser.add_argument('--attack', help='Specify the attack mode.')
 
     args = parser.parse_args()
-
+    print args
     # if createpub mode generate public key then quit
     if args.createpub:
         if args.n is None or args.e is None:
