@@ -17,6 +17,7 @@ this stuff is worth it, you can buy me a beer in return.
 from Crypto.PublicKey import RSA
 import signal
 import gmpy
+import gmpy2
 from libnum import *
 import requests
 import re
@@ -25,7 +26,41 @@ import os
 import subprocess
 import time
 import string
+from multiprocessing import Pool
+from functools import partial
 from glob import glob
+
+pool = Pool(4)
+
+def violence(j, cipher, N):
+    #print params['cipher'], params['N']
+    #j = params['input']
+    #cipher = params['cipher']
+    #N = params['N']
+    #print j, cipher, N
+    print j
+    a, b = gmpy2.iroot(cipher + j * N, 3)
+    if b == 1:
+        m = a
+        print '{:x}'.format(int(m)).decode('hex')
+        #pool.terminate()
+        exit()
+        return
+
+def SmallE(cipher, N):
+
+    inputs = range(118600000, 118720000)
+    partial_work = partial(violence, cipher=cipher, N=N)
+    pool.map(partial_work, inputs)
+    pool.close()
+    pool.join()
+
+def egcd(a, b):
+    if a == 0:
+        return b, 0, 1
+    else:
+        g, y, x = egcd(b % a, a)
+        return g, x - b // a * y, y
 
 
 class FactorizationError(Exception):
@@ -72,41 +107,55 @@ class PrivateKey(object):
 
 class RSAAttack(object):
     def __init__(self, args):
-        if '*' in args.publickey or '?' in args.publickey:
-            # get list of public keys from wildcard expression
-            self.pubkeyfilelist = glob(args.publickey)
-            self.args = args
+        if args.publickey is not None:
+            #if '*' in args.publickey or '?' in args.publickey:
+            if isinstance(args.publickey, list):
 
-            if args.verbose:
-                print "[*] Multikey mode using keys: " + repr(self.pubkeyfilelist)
+                if args.cipher is not None and isinstance(args.cipher, list):
+                    self.cipherfilelist = args.cipher
+                    if args.verbose:
+                        print "[*] Multikey mode using cipher text: " + repr(self.cipherfilelist)
+                    self.cipherobjs = []
+                    for c in self.cipherfilelist:
+                        ciphertext = open(c, 'rb').read().encode('hex')
+                        self.cipherobjs.append(string.atoi(ciphertext, base=16))
+                else:
+                    self.cipherobjs = None
 
-            # Initialize a list of objects by recursively calling this on each key
-            self.attackobjs = []
-            for pub in self.pubkeyfilelist:
-                args.publickey = pub  # is this a kludge or is this elegant?
-                self.attackobjs.append(RSAAttack(args))
-        else:
-            # Load single public key
-            key = open(args.publickey, 'rb').read()
-            self.pubkeyfile = args.publickey
-            self.pub_key = PublicKey(key)
-            self.priv_key = None
-            self.displayed = False   # have we already spammed the user with this private key?
-            self.args = args
-            self.unciphered = None
-            self.attackobjs = None  # This is how we'll know this object represents 1 key
+                # get list of public keys from wildcard expression
+                self.pubkeyfilelist = args.publickey
+                self.args = args
 
-            # Test if sage is working and if so, load additional sage based attacks
-            if args.sageworks:
-                self.implemented_attacks.append(self.smallfraction)
-                self.implemented_attacks.append(self.boneh_durfee)
-                self.implemented_attacks.append(self.ecm)           # make sure ECM always comes last!
+                if args.verbose:
+                    print "[*] Multikey mode using keys: " + repr(self.pubkeyfilelist)
 
-            # Load ciphertext
-            if args.uncipher is not None:
-                self.cipher = open(args.uncipher, 'rb').read().strip()
+                # Initialize a list of objects by recursively calling this on each key
+                self.attackobjs = []
+                for pub in self.pubkeyfilelist:
+                    args.publickey = pub  # is this a kludge or is this elegant?
+                    self.attackobjs.append(RSAAttack(args))
             else:
-                self.cipher = None
+                # Load single public key
+                key = open(args.publickey, 'rb').read()
+                self.pubkeyfile = args.publickey
+                self.pub_key = PublicKey(key)
+                self.priv_key = None
+                self.displayed = False   # have we already spammed the user with this private key?
+                self.args = args
+                self.unciphered = None
+                self.attackobjs = None  # This is how we'll know this object represents 1 key
+
+                # Test if sage is working and if so, load additional sage based attacks
+                if args.sageworks:
+                    self.implemented_attacks.append(self.smallfraction)
+                    self.implemented_attacks.append(self.boneh_durfee)
+                    self.implemented_attacks.append(self.ecm)           # make sure ECM always comes last!
+
+                # Load ciphertext
+                if args.uncipher is not None:
+                    self.cipher = open(args.uncipher, 'rb').read().strip()
+                else:
+                    self.cipher = None
         return
 
     def hastads(self):
@@ -136,32 +185,38 @@ class RSAAttack(object):
                 raise FactorizationError()
 
         # Factors available online?
-        try:
-            url_1 = 'http://www.factordb.com/index.php?query=%i'
-            url_2 = 'http://www.factordb.com/index.php?id=%s'
-            s = requests.Session()
-            r = s.get(url_1 % self.pub_key.n)
-            time.sleep(5)
-            regex = re.compile("index\.php\?id\=([0-9]+)", re.IGNORECASE)
-            ids = regex.findall(r.text)
-            p_id = ids[1]
-            q_id = ids[2]
-            # bugfix: See https://github.com/sourcekris/RsaCtfTool/commit/16d4bb258ebb4579aba2bfc185b3f717d2d91330#commitcomment-21878835
-            regex = re.compile("value=\"([0-9\^\-]+)\"", re.IGNORECASE)
-            r_1 = s.get(url_2 % p_id)
-            r_2 = s.get(url_2 % q_id)
-            key_p = regex.findall(r_1.text)[0]
-            key_q = regex.findall(r_2.text)[0]
-            self.pub_key.p = int(key_p) if key_p.isdigit() else solveforp(key_p)
-            self.pub_key.q = int(key_q) if key_q.isdigit() else solveforp(key_q)
-            if self.pub_key.p == self.pub_key.q == self.pub_key.n:
-                raise FactorizationError()
-            self.priv_key = PrivateKey(long(self.pub_key.p), long(self.pub_key.q),
-                                       long(self.pub_key.e), long(self.pub_key.n))
-            return
-        except Exception as e:
-            print '[!] exception occur.'
-            return
+        tryNum = 5
+        while tryNum > 0:
+            try:
+                url_1 = 'http://www.factordb.com/index.php?query=%i'
+                url_2 = 'http://www.factordb.com/index.php?id=%s'
+                s = requests.Session()
+                r = s.get(url_1 % self.pub_key.n)
+                time.sleep(5)
+                regex = re.compile("index\.php\?id\=([0-9]+)", re.IGNORECASE)
+                ids = regex.findall(r.text)
+                p_id = ids[1]
+                q_id = ids[2]
+                # bugfix: See https://github.com/sourcekris/RsaCtfTool/commit/16d4bb258ebb4579aba2bfc185b3f717d2d91330#commitcomment-21878835
+                regex = re.compile("value=\"([0-9\^\-]+)\"", re.IGNORECASE)
+                r_1 = s.get(url_2 % p_id)
+                r_2 = s.get(url_2 % q_id)
+                key_p = regex.findall(r_1.text)[0]
+                key_q = regex.findall(r_2.text)[0]
+                self.pub_key.p = int(key_p) if key_p.isdigit() else solveforp(key_p)
+                self.pub_key.q = int(key_q) if key_q.isdigit() else solveforp(key_q)
+                if self.pub_key.p == self.pub_key.q == self.pub_key.n:
+                    raise FactorizationError()
+                self.priv_key = PrivateKey(long(self.pub_key.p), long(self.pub_key.q),
+                                           long(self.pub_key.e), long(self.pub_key.n))
+                return
+            except Exception:
+
+                if self.args.verbose:
+                    print '[!] exception occur.'
+                tryNum -= 1
+                if tryNum < 0:
+                    return
 
     def wiener(self):
         # this attack module can be optional based on sympy and wiener_attack.py existing
@@ -288,6 +343,7 @@ class RSAAttack(object):
 
         return
 
+    #当存在两个公钥的n1,n2不互素时，我们显然可以直接对这两个数求最大公因数，然后直接获得p，q。进而获得相应的私钥
     def commonfactors(self):
         # Try to find the gcd between each pair of modulii and resolve the private keys if gcd > 1
         for x in self.attackobjs:
@@ -329,9 +385,36 @@ class RSAAttack(object):
                                            long(self.pub_key.e), long(self.pub_key.n))        
         return
 
+    #当两个用户使用相同的模数 N、不同的私钥时，加密同一明文消息时即存在共模攻击。
+    # python /sources/rsactftool/RsaCtfTool.py --publickey ./p/* --cipher ./c/* --attack commonmodulus --verbose
     def commonmodulus(self):
-        # NYI requires support for multiple public keys
-        return
+        if self.attackobjs is not None and self.cipherobjs is not None:
+            for x1 in self.attackobjs:
+                for x2 in self.attackobjs:
+                    if x1.pub_key.e <> x2.pub_key.e:
+                        for c1 in self.cipherobjs:
+                            for c2 in self.cipherobjs:
+                                if c1 <> c2:
+                                    n = x1.pub_key.n
+                                    e1 = x1.pub_key.e
+                                    e2 = x2.pub_key.e
+                                    s = egcd(e1, e2)
+                                    s1 = s[1]
+                                    s2 = s[2]
+                                    # 求模反元素
+                                    if s1 < 0:
+                                        s1 = -s1
+                                        c1 = gmpy.invert(c1, n)
+                                    elif s2 < 0:
+                                        s2 = -s2
+                                        c2 = gmpy.invert(c2, n)
+
+                                    m = pow(c1, s1, n) * pow(c2, s2, n) % n
+                                    print repr('{:x}'.format(int(m)).decode('hex'))
+                                    return
+        else:
+            #print "Common modulus attack done."
+            return
 
     def prime_modulus(self):
         # an attack where the modulus is not a composite number, so the math is unique
@@ -419,9 +502,34 @@ class RSAAttack(object):
 
         return
 
+
+
+    #e 特别小，比如 e 为 3
+    def smallE_3(self):
+
+        cipher = self.cipher.encode('hex')
+        cipher = string.atoi(cipher, base=16)
+        N = self.pub_key.n
+
+        #SmallE(cipher, N)
+        def calc(j):
+            a, b = gmpy.root(cipher + j * N, 3)
+            if b > 0:
+                m = a
+                print '{:x}'.format(int(m)).decode('hex')
+
+        # 暴力破解
+        inputs = range(0, 130000000)
+        map(calc, inputs)
+
+        return
+
     def attack(self):
         if self.attackobjs is not None:
-            self.commonfactors()
+            if self.cipherobjs is not None:
+                self.commonmodulus()
+            else:
+                self.commonfactors()
         else:
             # loop through implemented attack methods and conduct attacks
             for attack in self.implemented_attacks:
@@ -449,14 +557,14 @@ class RSAAttack(object):
             # If we wanted to decrypt, do it now
             if self.args.uncipher is not None and self.priv_key is not None:
                     self.unciphered = self.priv_key.decrypt(self.cipher)
-                    print "[+] Clear text : %s" % self.unciphered
+                    print "[+] Clear text : %s" % repr(self.unciphered)
             elif self.unciphered is not None:
-                    print "[+] Clear text : %s" % self.unciphered
+                    print "[+] Clear text : %s" % repr(self.unciphered)
             else:
                 if self.args.uncipher is not None and self.args.attack is None:
                     print "[-] Sorry, cracking failed"
 
-    implemented_attacks = [ nullattack, hastads, factordb, pastctfprimes, noveltyprimes, smallq, wiener, comfact_cn, fermat, siqs, rabin ]
+    implemented_attacks = [ nullattack, hastads, factordb, pastctfprimes, noveltyprimes, smallq, wiener, comfact_cn, fermat, siqs, rabin, commonmodulus, smallE_3 ]
 
 # source http://stackoverflow.com/a/22348885
 class timeout:
@@ -490,11 +598,12 @@ def sageworks():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='RSA CTF Tool Continued')
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--publickey', help='public key file. You can use wildcards for multiple keys.')
+    group.add_argument('--publickey', help='public key file. You can use wildcards for multiple keys.', nargs='*')
     group.add_argument('--createpub', help='Take n and e from cli and just print a public key then exit', action='store_true')
     group.add_argument('--dumpkey', help='Just dump the RSA variables from a key - n,e,d,p,q', action='store_true')
 
     parser.add_argument('--uncipher', help='uncipher a file', default=None)
+    parser.add_argument('--cipher', help='Input cipher file(s) for attack', nargs='*', default=None)
     parser.add_argument('--verbose', help='verbose mode (display n, e, p and q)', action='store_true')
     parser.add_argument('--private', help='Display private key if recovered', action='store_true')
     parser.add_argument('--ecmdigits', type=int, help='Optionally an estimate as to how long one of the primes is for ECM method', default=None)
